@@ -4,12 +4,13 @@
 # dependencies = []
 # ///
 """
-底图瓦片爬取脚本（标准 XYZ 切片）
+底图瓦片下载脚本（标准 XYZ 切片）
 
 防反爬：随机 UA / 随机 Referer / 请求抖动 / 并发限流 / 指数退避重试 / 429 退避
 性能：每线程持久连接（keep-alive）+ 高并发，实测吞吐可达浏览器的同量级
+中断：Ctrl+C 优雅收工，已下载的瓦片与预览页照常保留
 零三方依赖（纯标准库），uv run 或 python 直接跑均可。
-爬完自动在输出根目录生成 Leaflet 预览页 index.html。
+下载完自动在输出根目录生成 Leaflet 预览页 index.html。
 """
 import os
 import sys
@@ -21,7 +22,7 @@ import itertools
 import http.client
 import urllib.request
 from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 
 # ---------- 参数（按需调）----------
 USER_AGENTS = [
@@ -42,6 +43,7 @@ VALID_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 _tls = threading.local()          # 线程本地：持久连接 + 固定子域
 _sub_seq = itertools.count()
 _PROXY = {}                       # 环境变量代理，init_proxy() 时填充
+_stop = threading.Event()         # Ctrl+C 时置位，worker 立刻收工
 
 # 1x1 透明 GIF，预览页缺图兜底用
 TRANSPARENT_GIF = (b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -58,6 +60,18 @@ def init_proxy():
 
 def _proxy_url(scheme):
     return _PROXY.get(scheme) or _PROXY.get("all")
+
+
+def _sleep(sec):
+    """可分片打断的 sleep；返回 False 表示期间收到了停止信号。"""
+    end = time.time() + sec
+    while True:
+        remain = end - time.time()
+        if remain <= 0:
+            return True
+        if _stop.is_set():
+            return False
+        time.sleep(min(0.1, remain))
 
 
 def build_headers():
@@ -177,6 +191,8 @@ def _thread_sub(subdomains):
 
 
 def fetch(tpl, z, x, y, subdomains):
+    if _stop.is_set():                                  # 已收到 Ctrl+C，不再发起请求
+        return z, x, y, None
     scheme, netloc_t, path_t = tpl
     host_t, _, port_t = netloc_t.partition(":")
     host = host_t.replace("{s}", _thread_sub(subdomains))
@@ -184,8 +200,11 @@ def fetch(tpl, z, x, y, subdomains):
     path = (path_t.replace("{z}", str(z))
                   .replace("{x}", str(x))
                   .replace("{y}", str(y)))
-    time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))   # 轻微抖动，避免整齐脉冲
+    if not _sleep(random.uniform(DELAY_MIN, DELAY_MAX)):  # 轻微抖动，避免整齐脉冲
+        return z, x, y, None
     for attempt in range(MAX_RETRIES + 1):
+        if _stop.is_set():
+            return z, x, y, None
         try:
             conn = _get_conn(scheme, host, port)
             req_path = path
@@ -203,16 +222,19 @@ def fetch(tpl, z, x, y, subdomains):
                 return z, x, y, None                    # 瓦片不存在，正常情况
             if status == 429:                           # 被限流
                 _drop_conn()
-                time.sleep(3 * (2 ** attempt))
+                if not _sleep(3 * (2 ** attempt)):
+                    return z, x, y, None
                 continue
             if status in (500, 502, 503, 504):
                 _drop_conn()
-                time.sleep(1 + attempt)
+                if not _sleep(1 + attempt):
+                    return z, x, y, None
                 continue
             return z, x, y, None
         except Exception:
             _drop_conn()                                # 服务端关连接等，重连重试
-            time.sleep(0.5 * (attempt + 1))
+            if not _sleep(0.5 * (attempt + 1)):
+                return z, x, y, None
     return z, x, y, None
 
 
@@ -284,7 +306,8 @@ def write_preview(out_dir, ext, min_z, max_z, bbox):
 
 
 def main():
-    print("=== 底图瓦片爬取 ===")
+    print("=== 底图瓦片下载 ===")
+    print("（运行中按 Ctrl+C 可随时中断，已下载的瓦片会保留）")
     url = input("底图服务地址（含 {z}/{x}/{y}，可选 {s}）: ").strip()
     if not url:
         print("地址不能为空，退出。")
@@ -330,11 +353,16 @@ def main():
                 tasks.append((z, x, y))
 
     done = saved = failed = 0
+    interrupted = False
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futures = [ex.submit(fetch, tpl, z, x, y, subdomains) for (z, x, y) in tasks]
+    ex = ThreadPoolExecutor(max_workers=concurrency)
+    futures = [ex.submit(fetch, tpl, z, x, y, subdomains) for (z, x, y) in tasks]
+    try:
         for fut in as_completed(futures):
-            z, x, y, data = fut.result()
+            try:
+                z, x, y, data = fut.result()
+            except CancelledError:
+                continue
             done += 1
             if data:
                 p = os.path.join(out_dir, str(z), str(x))
@@ -348,16 +376,38 @@ def main():
                 el = max(time.time() - t0, 1e-9)
                 print(f"进度 {done}/{total}  已存 {saved}  失败 {failed}  "
                       f"耗时 {el:.0f}s  {done/el:.0f} 张/秒")
+    except KeyboardInterrupt:
+        interrupted = True
+        _stop.set()
+        print("\n[中断] 收到 Ctrl+C，正在收工……（再按一次可强制退出）")
+    finally:
+        for f in futures:
+            f.cancel()                                  # 未开始的任务直接作废
+        try:
+            ex.shutdown(wait=True, cancel_futures=True)
+        except KeyboardInterrupt:                       # 收工途中又按了一次
+            print("\n[强制退出] 已下载的瓦片保留在输出目录。")
+            os._exit(130)
 
     elapsed = max(time.time() - t0, 1e-9)
-    print(f"完成：成功 {saved}，失败 {failed}，总 {total}，"
-          f"耗时 {elapsed:.1f}s（{total/elapsed:.0f} 张/秒）。输出：{os.path.abspath(out_dir)}")
+    if interrupted:
+        print(f"[已中断] 成功 {saved}，失败 {failed}，进度 {done}/{total}，"
+              f"耗时 {elapsed:.1f}s。输出：{os.path.abspath(out_dir)}")
+    else:
+        print(f"完成：成功 {saved}，失败 {failed}，总 {total}，"
+              f"耗时 {elapsed:.1f}s（{total/elapsed:.0f} 张/秒）。输出：{os.path.abspath(out_dir)}")
 
     if saved > 0:
         preview = write_preview(out_dir, ext, min_z, max_z, bbox)
         print(f"预览页已生成：{preview}")
+        if interrupted:
+            print("（按级别范围逐个下的话，前面级别的瓦片通常是完整的，可以直接看）")
         print("打开方式：双击 index.html；若瓦片加载不出来，在输出目录执行 python -m http.server 后访问 http://localhost:8000")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:                           # 输入阶段或收尾阶段被中断
+        print("\n已取消。")
+        sys.exit(130)
