@@ -7,7 +7,13 @@ __pycache__/
 .venv/
 venv/
 
-# 爬取产物
+# 打包产物
+dist/
+build/
+release/
+*.spec
+
+# 下载产物
 tiles/
 output/
 index.html

@@ -1,22 +1,33 @@
-# 底图瓦片爬取脚本
+# 底图瓦片下载脚本
 
-交互式爬取 XYZ 瓦片底图，内置防反爬，速度接近浏览器。零第三方依赖，Python 标准库即可运行。
+交互式下载 XYZ 瓦片底图，内置防反爬，速度接近浏览器。纯标准库、零依赖，也提供免安装的独立可执行文件。
 
-## 环境
+## 下载使用
 
-- Python ≥ 3.10
-- 无需安装任何包
+到 [Releases](https://github.com/giszhc/tile-download/releases) 页面按系统下载，解压即用：
 
-## 运行
+| 系统 | 压缩包 | 怎么跑 |
+|---|---|---|
+| Windows | `tile-download-windows-x64.zip` | 双击 `tile-download.exe` |
+| Linux | `tile-download-linux-x64.tar.gz` | `bash run.sh` |
+| macOS（Apple Silicon） | `tile-download-macos-arm64.tar.gz` | `bash run.sh` |
 
-```bash
-uv run tile_download.py
-```
+不用装 Python，压缩包里已经带好了。
 
-或
+## 从源码运行
+
+需要 Python ≥ 3.10，不需要装任何包：
 
 ```bash
 python tile_download.py
+```
+
+Windows 也可以直接双击 `run.bat`，macOS / Linux 执行 `bash run.sh`（两个启动脚本都会优先用同目录下的独立可执行文件，没有就退回源码运行）。
+
+也可以用 uv 跑：
+
+```bash
+uv run tile_download.py
 ```
 
 ## 中断
@@ -55,7 +66,7 @@ python tile_download.py
 
 ```
 输出目录/
-  index.html        ← 爬完自动生成的 Leaflet 预览页
+  index.html        ← 下载完自动生成的 Leaflet 预览页
   10/
     843/
       388.png
@@ -65,7 +76,7 @@ python tile_download.py
 
 ## 预览
 
-爬取完成后自动在输出根目录生成 `index.html`（Leaflet，CDN 引入，轻量）。
+下载完成后自动在输出根目录生成 `index.html`（Leaflet，CDN 引入，轻量）。
 
 - 双击打开即可看拼合效果，起点自动对准你裁剪范围的中心
 - 右上角实时显示**当前地图级别**，缩放后立即刷新
@@ -162,8 +173,27 @@ set HTTPS_PROXY=
 unset HTTPS_PROXY
 ```
 
+## 自己打包
+
+Windows 单文件 exe：
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --console --clean --noconfirm \
+  --name tile-download \
+  --distpath dist --workpath build --specpath build \
+  tile_download.py
+```
+
+产物在 `dist/tile-download.exe`（约 9 MB，已内嵌 Python 运行时）。
+
+三个平台的正式发布包由 GitHub Actions 构建：给仓库推一个 `v*` 标签，或在 Actions 页面手动触发 `Release` 工作流并填版本号，会自动编译并发布到 Releases。
+
 ## 注意
 
 - 不填裁剪范围 = 全球，高倍级瓦片数量爆炸（18 级全球约数百亿张），脚本会在预估超过 100 万张时二次确认，建议始终填写裁剪范围。
 - 并发开太高会被目标服务限流甚至封 IP，遇到大量 429 就降并发。
+- Windows 版 exe 由 PyInstaller 打包，个别杀软会误报，放行即可；不放心就用源码跑。
+- macOS 版是 Apple Silicon（arm64）构建，Intel Mac 请用源码运行；若提示「无法验证开发者」，`run.sh` 会自动去掉隔离标记，不行就手动执行 `xattr -d com.apple.quarantine tile-download`。
+- Linux 版在较新的发行版上构建，老系统（如 CentOS 7）可能因 glibc 版本报错，这类情况用源码跑。
 - 请遵守目标服务的服务条款与版权要求，勿用于商业分发未授权数据。

@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，例如 v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            asset: tile-download-windows-x64.zip
+          - os: ubuntu-latest
+            label: linux-x64
+            asset: tile-download-linux-x64.tar.gz
+          - os: macos-latest
+            label: macos-arm64
+            asset: tile-download-macos-arm64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 PyInstaller
+        run: pip install pyinstaller
+
+      - name: 打包单文件可执行程序
+        shell: bash
+        run: |
+          pyinstaller --onefile --console --clean --noconfirm \
+            --name tile-download \
+            --distpath dist --workpath build --specpath build \
+            tile_download.py
+
+      - name: 组装发布目录
+        shell: bash
+        run: |
+          mkdir -p release
+          cp README.md release/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/tile-download.exe release/
+            cp run.bat release/
+            cp tile_download.py release/
+          else
+            cp dist/tile-download release/
+            cp run.sh release/
+            cp tile_download.py release/
+            chmod +x release/tile-download release/run.sh
+          fi
+          ls -lh release
+
+      - name: 压缩（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path release/* -DestinationPath ${{ matrix.asset }}
+
+      - name: 压缩（Linux / macOS）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cd release && tar -czf "../${{ matrix.asset }}" *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: ls -lh artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
